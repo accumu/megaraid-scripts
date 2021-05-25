@@ -1,0 +1,442 @@
+#!/usr/bin/perl
+# vim:sw=4:sts=4:ts=8:et
+#
+# Script for checking for MegaRAID controller status
+#
+# Written by Niklas Edmundsson in May 2021, based on older scripts.
+
+# Copyright (C) 2021 Niklas Edmundsson <nikke@acc.umu.se>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+use warnings;
+use strict;
+
+use JSON;
+use Data::Dumper;
+$Data::Dumper::Sortkeys = 1;
+$Data::Dumper::Indent = 1;
+
+# FIXME: This is currently hard-coded to work with storcli (IBM/Lenovo etc)
+# and perccli (Dell) on amd64/x86_64.
+$ENV{PATH}="/opt/MegaRAID/storcli:/opt/MegaRAID/perccli:$ENV{PATH}";
+my @cli = ("storcli64", "perccli64");
+
+my $ctrltotal=0;
+my $vdtotal=0;
+my $pdtotal=0;
+my $enctotal=0;
+
+# Acronyms output by various storcli commands, incomplete list.
+my %lsiacro = (
+    # From show
+    Ctl     => 'Controller Index',
+    DGs     => 'Drive groups',
+    VDs     => 'Virtual drives',
+    Fld     => 'Failed',
+    PDs     => 'Physical drives',
+    DNOpt   => 'DG NotOptimal',
+    VNOpt   => 'VD NotOptimal',
+    Opt     => 'Optimal',
+    Msng    => 'Missing',
+    Dgd     => 'Degraded',
+    NdAtn   => 'Need Attention',
+    Unkwn   => 'Unknown',
+    sPR     => 'Scheduled Patrol Read',
+    DS      => 'DimmerSwitch',
+    EHS     => 'Emergency Hot Spare',
+    Y       => 'Yes',
+    N       => 'No',
+    ASOs    => 'Advanced Software Options',
+    BBU     => 'Battery backup unit',
+    Hlth    => 'Health',
+    Safe    => 'Safe-mode boot',
+    # From /c0/eall/sall show all
+    DHS     => 'Dedicated Hot Spare',
+    UGood   => 'Unconfigured Good',
+    GHS     => 'Global Hotspare',
+    UBad    => 'Unconfigured Bad',
+    Onln    => 'Online',
+    Offln   => 'Offline',
+    UGUnsp  => 'Unsupported',
+    UGShld  => 'UnConfigured shielded',
+    HSPShld => 'Hotspare shielded',
+    CFShld  => 'Configured shielded',
+    Cpybck  => 'CopyBack',
+    CBShld  => 'Copyback Shielded',
+    # From /c0/vall show
+    Cac     => 'CacheCade',
+    Rec     => 'Recovery',
+    OfLn    => 'OffLine',
+    Pdgd    => 'Partially Degraded',
+    Dgrd    => 'Degraded',
+    Optl    => 'Optimal',
+    RO      => 'Read Only',
+    RW      => 'Read Write',
+    HD      => 'Hidden',
+    B       => 'Blocked',
+    Consist => 'Consistent',
+    # From /c0 show all (Topology)
+    Rbld    => 'Rebuild',
+    Offln   => 'Offline',
+    Frgn    => 'Foreign',
+    dflt    => 'Default',
+    Msng    => 'Missing',
+    FSpace  => 'Free Space Present'
+);
+
+sub showacro
+{
+    my ($acro) = @_;
+
+    if($lsiacro{$acro}) {
+        return $lsiacro{$acro};
+    }
+
+    return $acro;
+}
+
+sub runcmd
+{
+    my ($cmd) = @_;
+    my $json = `$cmd J 2>/dev/null`;
+
+    if(!$json) {
+        # $cmd not found
+        return undef;
+    }
+
+    my $data;
+    # decode_json croaks on error, so need to catch it if we don't want to
+    # abort script...
+    eval {
+        $data = decode_json($json);
+    };
+    if($@) {
+        warn "runcmd(): $cmd failed: $@";
+        return undef;
+    }
+
+    if($ENV{DEBUG}) {
+        print STDERR "runcmd(): '$cmd' data:\n";
+        print STDERR Dumper $data;
+    }
+
+    if($data && $data->{Controllers}) {
+        foreach my $ctrl( @{$data->{Controllers}} ) {
+            if(!$ctrl->{'Response Data'}) {
+                warn "runcmd(): $cmd: No Response Data";
+                $data = undef;
+                last;
+            }
+        }
+    }
+    else {
+        warn "runcmd(): No data or data->{Controllers}";
+        $data = undef;
+    }
+
+    return $data;
+}
+
+# -------------------------------------------------------
+# main()
+
+my $ret = 0;
+
+foreach my $storcli (@cli) {
+    my $data = runcmd("$storcli show");
+    next unless($data);
+
+    my $ctrlsubtotal=$data->{Controllers}[0]{'Response Data'}{'Number of Controllers'};
+
+    if(!defined($ctrlsubtotal)) {
+        die "Unable to determine Number of Controllers from $storcli, check if JSON output has changed";
+        next;
+    }
+
+    if($ctrlsubtotal < 1) {
+        next;
+    }
+
+    $ctrltotal += $ctrlsubtotal;
+
+    for my $c (@{$data->{Controllers}[0]{'Response Data'}{'System Overview'}}) {
+        my @summary;
+        my @faults;
+        my @warns;
+
+        if(!$c) {
+            die "Unable to determine System Overview from $storcli, check if JSON output has changed";
+        }
+
+        my $ctrl = $c->{Ctl};
+
+        # Double-check that the keys we use from the summary exists
+        foreach my $key (qw(DNOpt DGs VNOpt VDs BBU Hlth)) {
+            if(!defined($c->{$key})) {
+                die "Unable to determine find $key from $storcli, check if JSON output has changed";
+            }
+        }
+
+        # The overview is good enough to detect brokenness and emit a
+        # short summary message.
+        if($c->{DNOpt}) {
+            push @summary, "$c->{DNOpt} of $c->{DGs} Drive groups NOT OK";
+        }
+        if($c->{VNOpt}) {
+            push @summary, "$c->{VNOpt} of $c->{VDs} Virtual drives NOT OK";
+        }
+        if($c->{BBU} !~ /^(Opt|Msng|N\/A)$/) {
+            push @summary, "BBU " . showacro($c->{BBU});
+        }
+
+        my $cshowall = runcmd("$storcli /c$ctrl show all");
+        if(!$cshowall) {
+            die "Unable to get controller $ctrl show all from $storcli";
+        }
+
+        my $rebuilding = 0;
+
+        # We need to collect the drive info from the various arrays into a hash
+        # so we can emit useful message/status based on the overall state.
+        my %drv;
+            
+        foreach my $t (@{$cshowall->{Controllers}[0]{'Response Data'}{'TOPOLOGY'}})
+        {
+            # Deliberately ignore per-array status, it shows up as
+            # degraded until rebuild is done which screws things up
+            # for us...
+            next if($t->{DG}=~/^\d+$/ && $t->{Arr}=~/^\d+$/ && $t->{Row} eq '-');
+
+            if($t->{State} eq "Rbld") {
+                $rebuilding++;
+            }
+            elsif($t->{State} eq "Msng") {
+                # Completely missing (ie. logically/physically unplugged
+                # status) don't show up in the drive list, only in the topology,
+                # so we need to emit something useful/helpful here.
+                push @faults, "Physical Drive $t->{DG}/$t->{Arr}/$t->{Row} Missing";
+            }
+        }
+
+        my %vall;
+        if($cshowall->{Controllers}[0]{'Response Data'}{'VD LIST'}) {
+            my $vshowall = runcmd("$storcli /c$ctrl/vall show all");
+            if(!$vshowall) {
+                die "Unable to get controller $ctrl show vall from $storcli";
+            }
+
+            my $bgi = runcmd("$storcli /c$ctrl/vall show bgi");
+            # Let's just have a mental meltdown for a moment and cry, then
+            # rearrange the data structure we get from storcli into hierarchy
+            # instead of a flat-ish mix of arrays and hashes...
+            while (my ($k, $v) = each %{$vshowall->{Controllers}[0]{'Response Data'}})
+            {
+                next unless($k =~ m#^/c.*/v(\d+)#);
+                my $vd = $1;
+
+                $vall{$k}{info} = $v->[0];
+                $vall{$k}{properties} = $vshowall->{Controllers}[0]{'Response Data'}{"VD$vd Properties"};
+                foreach my $d (@{$vshowall->{Controllers}[0]{'Response Data'}{"PDs for VD $vd"}})
+                {
+                    # FIXME: Or point at relevant %drvs entry?
+                    $vall{$k}{pds}{$d->{'EID:Slt'}} = $d;
+                }
+            }
+            foreach my $b (@{$bgi->{Controllers}[0]{'Response Data'}{'VD Operation Status'}})
+            {
+                $vall{"/c$ctrl/v$b->{VD}"}{bgi} = $b
+            }
+        }
+
+        if($ENV{DEBUG}) {
+            print "vall:\n";
+            print Dumper \%vall;
+        }
+
+        my $numvds = scalar keys %vall;
+        if($numvds) {
+            $vdtotal += $numvds;
+        }
+        foreach my $vd (sort keys %vall)
+        {
+            # $vd is on the form /cX/vY
+            my $info = $vall{$vd}{info};
+            my $prop = $vall{$vd}{properties};
+            my $bgi = $vall{$vd}{bgi};
+
+            my $vdstr = "Virtual Drive $vd ($info->{Name}, $info->{TYPE}, $info->{Size})";
+
+            if($info->{State} ne 'Optl') {
+                push @faults, "$vdstr: State " . showacro($info->{State});
+            }
+
+            if($info->{Access} ne 'RW') {
+                push @faults, "$vdstr: Access $info->{Access}";
+            }
+
+            if($prop->{'Active Operations'} ne 'None' && $prop->{'Active Operations'} !~ /Background Initialization/i) {
+                push @faults, "$vdstr: $prop->{'Active Operations'}";
+            }
+
+            if($bgi->{Status} eq 'In progress')
+            {
+                push @faults, "$vdstr: BG Init ($bgi->{'Progress%'}%, ETA $bgi->{'Estimated Time Left'})";
+            }
+            elsif($info->{Consist} ne 'Yes') {
+                push @faults, "$vdstr: NOT Consistent";
+            }
+        }
+
+        my $numpds = $cshowall->{Controllers}[0]{'Response Data'}{'Physical Drives'};
+        $pdtotal += $numpds;
+        foreach my $p (@{$cshowall->{Controllers}[0]{'Response Data'}{'PD LIST'}})
+        {
+            my $d;
+            if($p->{'EID:Slt'} =~ /^(\S+):(\S+)$/) {
+                $d = "/c$ctrl/e$1/s$2";
+                $drv{$d}{state} = $p->{State};
+            }
+        }
+
+        if($rebuilding) {
+            my $rebuild = runcmd("$storcli /c$ctrl/eall/sall show rebuild");
+            if(!$rebuild) {
+                warn "Unable to get ctrl $ctrl drive rebuild status from $storcli";
+                last;
+            }
+
+            foreach my $r (@{$rebuild->{Controllers}[0]{'Response Data'}}) {
+                $drv{$r->{'Drive-ID'}}{progress} = $r->{'Progress%'};
+            }
+        }
+
+        my $drvinfo = runcmd("$storcli /c$ctrl/eall/sall show all");
+        if(!$drvinfo) {
+            warn "Unable to get ctrl $ctrl drive show all from $storcli";
+            last;
+        }
+
+        foreach my $s (keys %drv) {
+            my $ddi = $drvinfo->{Controllers}[0]{'Response Data'}{"Drive $s - Detailed Information"};
+            next unless($ddi);
+
+            $drv{$s}{smartalert} = $ddi->{"Drive $s State"}{'S.M.A.R.T alert flagged by drive'};
+
+            foreach my $itm ('Predictive Failure') {
+                my $val = $ddi->{"Drive $s State"}{"$itm Count"};
+                if($val > 1) {
+                    $drv{$s}{"${itm}s"} = $val;
+                }
+            }
+        }
+
+        if($ENV{DEBUG}) {
+            print "drv:\n";
+            print Dumper \%drv;
+        }
+
+        my $drvucount = 0;
+        my $drvrebuild = 0;
+        my $drvnonopt = 0;
+        foreach my $d (sort keys %drv) {
+            my $ds = $drv{$d}{state};
+            if($ds !~ /^(Onln|JBOD|GHS|DHS)$/) {
+                if($ds eq 'UGood') {
+                    $drvucount++;
+                    push @warns, "Physical Drive $d Unused";
+                }
+                else {
+                    if($ds eq 'Rbld') {
+                        $drvrebuild++;
+                    }
+                    else {
+                        $drvnonopt++;
+                    }
+                    my $extra="";
+                    if(defined($drv{$d}{progress})) {
+                        $extra = " ($drv{$d}{progress}%)";
+                    }
+                    push @faults, "Physical Drive $d State " . showacro($ds) . $extra;
+                    # Don't check/complain again for this drive
+                    next;
+                }
+            }
+
+            if($drv{$d}{smartalert} && $drv{$d}{smartalert} ne 'No') {
+                push @faults, "Physical Drive $d: SMART alert";
+            }
+            foreach my $s (('Predictive Failures'))
+            {
+                if($drv{$d}{$s}) {
+                    push @faults, "Physical Drive $d: $s $drv{$d}{$s}";
+                }
+            }
+        }
+
+        my $encs = runcmd("$storcli /c$ctrl/eall show all");
+        if(!$encs) {
+            warn "Unable to get ctrl $ctrl enclosure show all from $storcli";
+            last;
+        }
+        foreach my $enc (sort keys %{$encs->{Controllers}[0]{'Response Data'}}) {
+            $enctotal++;
+            my $status = $encs->{Controllers}[0]{'Response Data'}{$enc}{Information}{Status};
+            if(!$status) {
+                warn "Unable to determine enclosure status from $storcli, check if JSON output has changed";
+                last;
+            }
+            $enc =~ s/^Enclosure //i; # Drop "Enclosure" text
+            $enc =~ s/ *$//; # Drop trailing space...
+            if($status ne 'OK') {
+                push @faults, "Enclosure $enc $status";
+            }
+        }
+
+        # --------------------------------------------------------------
+
+        if($drvucount) {
+            push @summary, "$drvucount of $c->{PDs} Physical drives unused";
+        }
+        if($drvrebuild) {
+            push @summary, "$drvrebuild of $c->{PDs} Physical drives Rebuilding";
+        }
+        if($drvnonopt) {
+            push @summary, "$drvnonopt of $c->{PDs} Physical drives NOT OK";
+        }
+
+        if(@summary || @faults || @warns) {
+            $ret = 1;
+            print "/c$ctrl ($c->{Model}): " . showacro($c->{Hlth}) . "\n";
+            if(@summary) {
+                print "  ", join("\n  ", @summary) . "\n";
+            }
+            if(@faults) {
+                print "  ", join("\n  ", @faults) . "\n";
+            }
+            if(@warns) {
+                print "  ", join("\n  ", @warns) . "\n";
+            }
+        }
+
+    }
+}
+
+
+if($ctrltotal < 1) {
+    warn "No MegaRAID controllers found";
+}
+
+exit $ret;
