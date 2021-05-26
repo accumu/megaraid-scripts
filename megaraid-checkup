@@ -159,11 +159,18 @@ foreach my $storcli (@cli) {
     my $data = runcmd("$storcli show");
     next unless($data);
 
-    my $ctrlsubtotal=$data->{Controllers}[0]{'Response Data'}{'Number of Controllers'};
-
-    if(!defined($ctrlsubtotal)) {
+    # 'Number of Controllers' is sum of megaraid and IT mode controllers, but
+    # a good basic check to catch a drastic JSON format change.
+    if(!defined($data->{Controllers}[0]{'Response Data'}{'Number of Controllers'})) {
         die "Unable to determine Number of Controllers from $storcli, check if JSON output has changed";
         next;
+    }
+
+    # The actual number of megaraid controllers is actually the size of the
+    # 'System Overview' array, if it exists!
+    my $ctrlsubtotal = 0;
+    if(exists($data->{Controllers}[0]{'Response Data'}{'System Overview'})) {
+        $ctrlsubtotal = scalar @{$data->{Controllers}[0]{'Response Data'}{'System Overview'}};
     }
 
     if($ctrlsubtotal < 1) {
@@ -176,10 +183,6 @@ foreach my $storcli (@cli) {
         my @summary;
         my @faults;
         my @warns;
-
-        if(!$c) {
-            die "Unable to determine System Overview from $storcli, check if JSON output has changed";
-        }
 
         my $ctrl = $c->{Ctl};
 
