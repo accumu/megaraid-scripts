@@ -340,7 +340,7 @@ foreach my $storcli (@cli) {
 
             foreach my $itm ('Predictive Failure') {
                 my $val = $ddi->{"Drive $s State"}{"$itm Count"};
-                if($val > 1) {
+                if($val > 0) {
                     $drv{$s}{"${itm}s"} = $val;
                 }
             }
