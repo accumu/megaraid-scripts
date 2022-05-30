@@ -338,7 +338,7 @@ foreach my $storcli (@cli) {
 
             $drv{$s}{smartalert} = $ddi->{"Drive $s State"}{'S.M.A.R.T alert flagged by drive'};
 
-            foreach my $itm ('Predictive Failure') {
+            foreach my $itm ('Predictive Failure', 'Media Error') {
                 my $val = $ddi->{"Drive $s State"}{"$itm Count"};
                 if($val > 0) {
                     $drv{$s}{"${itm}s"} = $val;
@@ -381,7 +381,7 @@ foreach my $storcli (@cli) {
             if($drv{$d}{smartalert} && $drv{$d}{smartalert} ne 'No') {
                 push @faults, "Physical Drive $d: SMART alert";
             }
-            foreach my $s (('Predictive Failures'))
+            foreach my $s (('Predictive Failures', 'Media Errors'))
             {
                 if($drv{$d}{$s}) {
                     push @faults, "Physical Drive $d: $s $drv{$d}{$s}";
