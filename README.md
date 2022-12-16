@@ -1,7 +1,7 @@
 # megaraid-scripts
 MegaRAID controller scripts for monitoring and diagnostics.
 
-These scripts require the appropriat MegaRAID utility to be installed:
+These scripts require the appropriate MegaRAID utility to be installed:
 * storcli - most vendors, including IBM/Lenovo
 * perccli - Dell PERC branded controllers
 
