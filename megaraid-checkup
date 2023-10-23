@@ -5,7 +5,7 @@
 #
 # Written by Niklas Edmundsson in May 2021, based on older scripts.
 
-# Copyright (C) 2021 Niklas Edmundsson <nikke@acc.umu.se>
+# Copyright (C) 2023 Niklas Edmundsson <nikke@accum.se>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
@@ -27,6 +27,10 @@ use JSON;
 use Data::Dumper;
 $Data::Dumper::Sortkeys = 1;
 $Data::Dumper::Indent = 1;
+
+my %thresholds = (
+    'Media Errors' => 10, # Avoid noise from spurious errors
+);
 
 # FIXME: This is currently hard-coded to work with storcli (IBM/Lenovo etc)
 # and perccli (Dell) on amd64/x86_64.
@@ -383,7 +387,7 @@ foreach my $storcli (@cli) {
             }
             foreach my $s (('Predictive Failures', 'Media Errors'))
             {
-                if($drv{$d}{$s}) {
+                if($drv{$d}{$s} && ($thresholds{$s} // 0) < $drv{$d}{$s}) {
                     push @faults, "Physical Drive $d: $s $drv{$d}{$s}";
                 }
             }
