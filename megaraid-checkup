@@ -34,8 +34,8 @@ my %thresholds = (
 
 # FIXME: This is currently hard-coded to work with storcli (IBM/Lenovo etc)
 # and perccli (Dell) on amd64/x86_64.
-$ENV{PATH}="/opt/MegaRAID/storcli:/opt/MegaRAID/perccli:$ENV{PATH}";
-my @cli = ("storcli64", "perccli64");
+$ENV{PATH}="/opt/MegaRAID/perccli:/opt/MegaRAID/storcli:$ENV{PATH}";
+my @cli = ("perccli64", "storcli64");
 
 my $ctrltotal=0;
 my $vdtotal=0;
@@ -159,6 +159,11 @@ sub runcmd
 
 my $ret = 0;
 
+# Lately the Dell and Lenovo storcli:s seems to have stopped filtering out
+# controllers from other vendors, so we get duplicates if both are installed.
+# Solve it by keeping track of controllers we've seen.
+my %ctrlseen;
+
 foreach my $storcli (@cli) {
     my $data = runcmd("$storcli show");
     next unless($data);
@@ -181,8 +186,6 @@ foreach my $storcli (@cli) {
         next;
     }
 
-    $ctrltotal += $ctrlsubtotal;
-
     for my $c (@{$data->{Controllers}[0]{'Response Data'}{'System Overview'}}) {
         my @summary;
         my @faults;
@@ -191,11 +194,17 @@ foreach my $storcli (@cli) {
         my $ctrl = $c->{Ctl};
 
         # Double-check that the keys we use from the summary exists
-        foreach my $key (qw(DNOpt DGs VNOpt VDs BBU Hlth)) {
+        foreach my $key (qw(Model DNOpt DGs VNOpt VDs BBU Hlth)) {
             if(!defined($c->{$key})) {
                 die "Unable to determine find $key from $storcli, check if JSON output has changed";
             }
         }
+
+        next if($ctrlseen{$ctrl}{$c->{Model}});
+
+        $ctrlseen{$ctrl}{$c->{Model}} = 1;
+
+        $ctrltotal++;
 
         # The overview is good enough to detect brokenness and emit a
         # short summary message.
